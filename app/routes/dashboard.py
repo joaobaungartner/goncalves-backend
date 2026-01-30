@@ -45,6 +45,21 @@ def _receita_expr():
 
 
 # ---------- 1. Visão Geral ----------
+def _parse_date_to_year_month(value) -> Optional[tuple]:
+    """Extrai (ano, mês) de datetime ou string ISO. Retorna None se inválido."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return (value.year, value.month)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return (dt.year, dt.month)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 @router.get("/visao-geral")
 async def visao_geral(
     date_from: Optional[str] = None,
@@ -55,32 +70,52 @@ async def visao_geral(
     """
     KPIs: faturamento total, volume kg, nº pedidos, ticket médio, NPS médio.
     Comparação mês atual vs mês anterior.
+    Se date_from/date_to não forem informados, mes_atual = último mês com dados no banco.
     """
     today = datetime.utcnow()
-    ano = ano_atual or today.year
-    mes = mes_atual or today.month
-
-    # Mês atual
-    start_current = datetime(ano, mes, 1)
-    if mes == 12:
-        end_current = datetime(ano + 1, 1, 1) - timedelta(microseconds=1)
-    else:
-        end_current = datetime(ano, mes + 1, 1) - timedelta(microseconds=1)
-
-    # Mês anterior
-    if mes == 1:
-        start_prev = datetime(ano - 1, 12, 1)
-        end_prev = datetime(ano, 1, 1) - timedelta(microseconds=1)
-    else:
-        start_prev = datetime(ano, mes - 1, 1)
-        end_prev = start_current - timedelta(microseconds=1)
+    ano = ano_atual
+    mes = mes_atual
 
     if date_from and date_to:
+        # Período explícito: usa como "atual" e calcula "anterior" com mesmo tamanho
         start_current = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
         end_current = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
         delta = end_current - start_current
         end_prev = start_current - timedelta(microseconds=1)
         start_prev = end_prev - delta
+        ano = start_current.year
+        mes = start_current.month
+    else:
+        # Sem período explícito: mes_atual = último mês com dados no banco
+        if ano is None or mes is None:
+            pipeline_ultimo = [
+                {"$match": {"data_pedido": {"$ne": None}}},
+                {"$group": {"_id": None, "max_date": {"$max": "$data_pedido"}}},
+            ]
+            res_ultimo = await fatos.aggregate(pipeline_ultimo).to_list(1)
+            if res_ultimo and res_ultimo[0].get("max_date"):
+                parsed = _parse_date_to_year_month(res_ultimo[0]["max_date"])
+                if parsed:
+                    ano, mes = parsed
+            if ano is None:
+                ano = today.year
+            if mes is None:
+                mes = today.month
+
+        # Intervalos do mês atual (último com dados ou informado)
+        start_current = datetime(ano, mes, 1)
+        if mes == 12:
+            end_current = datetime(ano + 1, 1, 1) - timedelta(microseconds=1)
+        else:
+            end_current = datetime(ano, mes + 1, 1) - timedelta(microseconds=1)
+
+        # Mês anterior
+        if mes == 1:
+            start_prev = datetime(ano - 1, 12, 1)
+            end_prev = datetime(ano, 1, 1) - timedelta(microseconds=1)
+        else:
+            start_prev = datetime(ano, mes - 1, 1)
+            end_prev = start_current - timedelta(microseconds=1)
 
     match_current = {"data_pedido": {"$gte": start_current, "$lte": end_current}}
     match_prev = {"data_pedido": {"$gte": start_prev, "$lte": end_prev}}
