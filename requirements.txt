@@ -4,3 +4,5 @@ motor
 pydantic
 python-dotenv
 openpyxl
+python-jose[cryptography]
+bcrypt
